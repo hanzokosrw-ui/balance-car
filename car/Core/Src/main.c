@@ -24,6 +24,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "encoder.h"
 #include "mpu_app.h"
 #include "motor.h"
 /* USER CODE END Includes */
@@ -90,12 +91,15 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_TIM3_Init();
+  MX_TIM4_Init();
+  MX_TIM8_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
 	Motor_Init();
-	
-	Motor_SetDuty(80, 80);
-	MpuApp_Init();
+
+	//Motor_SetDuty(80, 80);
+  Encoder_Init();
+
 
   /* USER CODE END 2 */
 
@@ -106,7 +110,8 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    MpuApp_Task();
+
+    Encoder_Task();
     HAL_Delay(1);
   }
   /* USER CODE END 3 */
