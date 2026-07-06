@@ -48,7 +48,7 @@
             <NotGenerated>0</NotGenerated>
             <InvalidFlash>1</InvalidFlash>
           </TargetStatus>
-          <OutputDirectory>car\</OutputDirectory>
+          <OutputDirectory>Objects\</OutputDirectory>
           <OutputName>car</OutputName>
           <CreateExecutable>1</CreateExecutable>
           <CreateLib>0</CreateLib>
@@ -402,6 +402,11 @@
               <FileName>mpu_app.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/mpu_app.c</FilePath>
+            </File>
+            <File>
+              <FileName>encoder.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/encoder.c</FilePath>
             </File>
             <File>
               <FileName>main.c</FileName>
