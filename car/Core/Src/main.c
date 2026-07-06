@@ -97,7 +97,7 @@ int main(void)
   /* USER CODE BEGIN 2 */
 	Motor_Init();
 
-	//Motor_SetDuty(80, 80);
+	Motor_SetDuty(80, 80);
   Encoder_Init();
 
 
