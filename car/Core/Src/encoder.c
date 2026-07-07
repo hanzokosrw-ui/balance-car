@@ -5,8 +5,8 @@
 #include "tim.h"
 
 #define ENCODER_PI_X1000 3142L
-#define ENCODER_LEFT_INVERT 1
-#define ENCODER_RIGHT_INVERT 0
+#define ENCODER_LEFT_INVERT 0U
+#define ENCODER_RIGHT_INVERT 1U
 
 typedef struct
 {

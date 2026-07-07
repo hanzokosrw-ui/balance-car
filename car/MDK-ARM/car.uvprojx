@@ -48,7 +48,7 @@
             <NotGenerated>0</NotGenerated>
             <InvalidFlash>1</InvalidFlash>
           </TargetStatus>
-          <OutputDirectory>Objects\</OutputDirectory>
+          <OutputDirectory>Build\</OutputDirectory>
           <OutputName>car</OutputName>
           <CreateExecutable>1</CreateExecutable>
           <CreateLib>0</CreateLib>
@@ -488,6 +488,16 @@
               <FileName>stm32f1xx_hal_msp.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/stm32f1xx_hal_msp.c</FilePath>
+            </File>
+            <File>
+              <FileName>speed_ctrl.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\speed_ctrl.c</FilePath>
+            </File>
+            <File>
+              <FileName>speed_ctrl.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\Inc\speed_ctrl.h</FilePath>
             </File>
           </Files>
         </Group>

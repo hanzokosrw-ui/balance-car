@@ -27,6 +27,7 @@
 #include "encoder.h"
 #include "mpu_app.h"
 #include "motor.h"
+#include "speed_ctrl.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -95,12 +96,10 @@ int main(void)
   MX_TIM8_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-	Motor_Init();
-
-	Motor_SetDuty(80, 80);
+  Motor_Init();
   Encoder_Init();
-
-
+  SpeedCtrl_Init();
+  SpeedCtrl_SetTarget(100, 100);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -110,8 +109,8 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-
     Encoder_Task();
+    SpeedCtrl_Task();
     HAL_Delay(1);
   }
   /* USER CODE END 3 */

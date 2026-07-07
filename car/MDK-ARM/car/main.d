@@ -31,5 +31,6 @@ car\main.o: ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_uart.h
 car\main.o: ../Core/Inc/tim.h
 car\main.o: ../Core/Inc/usart.h
 car\main.o: ../Core/Inc/gpio.h
+car\main.o: ../Core/Inc/encoder.h
 car\main.o: ../Core/Inc/mpu_app.h
 car\main.o: ../Core/Inc/motor.h

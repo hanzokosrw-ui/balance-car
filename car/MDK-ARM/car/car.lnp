@@ -2,6 +2,7 @@
 "car\startup_stm32f103xe.o"
 "car\motor.o"
 "car\mpu_app.o"
+"car\encoder.o"
 "car\main.o"
 "car\gpio.o"
 "car\tim.o"
