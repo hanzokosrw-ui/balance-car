@@ -10,14 +10,16 @@ extern "C" {
 #define ENCODER_LINES_PER_MOTOR_REV 500L
 #define ENCODER_GEAR_RATIO 30L
 #define ENCODER_QUADRATURE_MULTIPLIER 4L
-#define ENCODER_COUNTS_PER_WHEEL_REV \
-  (ENCODER_LINES_PER_MOTOR_REV * ENCODER_GEAR_RATIO * ENCODER_QUADRATURE_MULTIPLIER)
+#define ENCODER_COUNTS_PER_WHEEL_REV                  \
+  (ENCODER_LINES_PER_MOTOR_REV * ENCODER_GEAR_RATIO * \
+   ENCODER_QUADRATURE_MULTIPLIER)
 #define ENCODER_SAMPLE_PERIOD_MS 10U
 #define ENCODER_REPORT_PERIOD_MS 500U
 #define ENCODER_WHEEL_DIAMETER_MM 66L
 
-typedef struct
-{
+#ifndef ENCODER_STATE_T_DEFINED
+#define ENCODER_STATE_T_DEFINED
+typedef struct Encoder_State_t {
   int32_t left_count;
   int32_t right_count;
   int32_t left_speed_mm_s;
@@ -27,6 +29,7 @@ typedef struct
   int32_t left_rpm_x100;
   int32_t right_rpm_x100;
 } Encoder_State_t;
+#endif
 
 void Encoder_Init(void);
 void Encoder_Task(void);
