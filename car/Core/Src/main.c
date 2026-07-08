@@ -99,7 +99,7 @@ int main(void)
   Motor_Init();
   Encoder_Init();
   SpeedCtrl_Init();
-  SpeedCtrl_SetTarget(100, 100);
+  SpeedCtrl_SetTarget(500, 500);
   /* USER CODE END 2 */
 
   /* Infinite loop */
