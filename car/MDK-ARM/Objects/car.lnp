@@ -4,6 +4,7 @@
 "objects\mpu_app.o"
 "objects\encoder.o"
 "objects\speed_ctrl.o"
+"objects\bluetooth.o"
 "objects\main.o"
 "objects\gpio.o"
 "objects\tim.o"

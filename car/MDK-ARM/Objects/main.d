@@ -36,3 +36,4 @@ objects\main.o: ../Core/Inc/mpu_app.h
 objects\main.o: ../Core/Inc/motor.h
 objects\main.o: ..\OLED-Driver\oled.h
 objects\main.o: ../Core/Inc/speed_ctrl.h
+objects\main.o: ../Core/Inc/bluetooth.h
