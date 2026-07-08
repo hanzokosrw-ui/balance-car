@@ -127,6 +127,7 @@ int main(void)
   Encoder_Init();
   SpeedCtrl_Init();
   SpeedCtrl_SetTarget(500, 500);
+  MpuApp_Init();
   Bluetooth_Init();
   OLED_Clear();
   OLED_ShowString(0, 0, (u8 *)"BT WAIT");
@@ -166,6 +167,7 @@ int main(void)
 
     Encoder_Task();
     SpeedCtrl_Task();
+    MpuApp_Task();
     HAL_Delay(1);
   }
   /* USER CODE END 3 */
