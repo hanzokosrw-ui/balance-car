@@ -761,7 +761,7 @@ int mpu_read_reg(unsigned char reg, unsigned char *data)
  *  Initial configuration:\n
  *  Gyro FSR: +/- 2000DPS\n
  *  Accel FSR +/- 2G\n
- *  DLPF: 42Hz\n
+ *  DLPF: disabled, CONFIG=0\n
  *  FIFO rate: 50Hz\n
  *  Clock source: Gyro PLL\n
  *  FIFO: Disabled.\n
@@ -877,7 +877,7 @@ int mpu_init(void)
 			printf("876\n");
 			return -1;
 		}
-    if (mpu_set_lpf(42))
+    if (mpu_set_lpf(0))
     {
 			printf("881\n");
 			return -1;
@@ -1373,7 +1373,7 @@ int mpu_get_lpf(unsigned short *lpf)
 
 /**
  *  @brief      Set digital low pass filter.
- *  The following LPF settings are supported: 188, 98, 42, 20, 10, 5.
+ *  The following LPF settings are supported: 0, 188, 98, 42, 20, 10, 5.
  *  @param[in]  lpf Desired LPF setting.
  *  @return     0 if successful.
  */
@@ -1384,7 +1384,9 @@ int mpu_set_lpf(unsigned short lpf)
     if (!(st.chip_cfg.sensors))
         return -1;
 
-    if (lpf >= 188)
+    if (lpf == 0)
+        data = INV_FILTER_256HZ_NOLPF2;
+    else if (lpf >= 188)
         data = INV_FILTER_188HZ;
     else if (lpf >= 98)
         data = INV_FILTER_98HZ;
@@ -1461,8 +1463,7 @@ int mpu_set_sample_rate(unsigned short rate)
         mpu_set_compass_sample_rate(min(st.chip_cfg.compass_sample_rate, MAX_COMPASS_SAMPLE_RATE));
 #endif
 
-        /* Automatically set LPF to 1/2 sampling rate. */
-        mpu_set_lpf(st.chip_cfg.sample_rate >> 1);
+        mpu_set_lpf(0);
         return 0;
     }
 }
@@ -2913,4 +2914,6 @@ lp_int_restore:
 /**
  *  @}
  */
+
+/* by codex */
 

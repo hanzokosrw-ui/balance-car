@@ -48,10 +48,12 @@ void MpuApp_Task(void) {
   if ((now_ms - last_print_ms) < MPU_APP_PRINT_PERIOD_MS) return;
   last_print_ms = now_ms;
 
-  printf("%.2f,%.2f,%.2f\r\n",
+ /* printf("%.2f,%.2f,%.2f\r\n",
          (double)attitude.pitch,
          (double)attitude.roll,
-         (double)attitude.yaw);
+         (double)attitude.yaw); */
+	
+	printf("%.2f\r\n", (double)attitude.pitch); 
 }
 
 uint8_t MpuApp_Read(MpuApp_Attitude_t *attitude) {
