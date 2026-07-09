@@ -4,12 +4,15 @@
 #include <stdio.h>
 #include "MPU6050.h"
 
-#define MPU_APP_READ_PERIOD_MS 10U
+#define MPU_APP_READ_PERIOD_MS 5U
+#define MPU_APP_PRINT_PERIOD_MS 20U
 
 extern __IO float fAX, fAY, fAZ;
 extern __IO short gx, gy, gz, ax, ay, az;
 
 static uint32_t last_read_ms = 0U;
+static uint32_t last_print_ms = 0U;
+static uint32_t latest_sample_id = 0U;
 static uint8_t latest_valid = 0U;
 static MpuApp_Attitude_t latest_attitude;
 
@@ -17,6 +20,8 @@ static void MpuApp_UpdateLatest(MpuApp_Attitude_t *attitude);
 
 uint8_t MpuApp_Init(void) {
   last_read_ms = 0U;
+  last_print_ms = 0U;
+  latest_sample_id = 0U;
   latest_valid = 0U;
 
   i2cInit();
@@ -40,6 +45,9 @@ void MpuApp_Task(void) {
 
   if (MpuApp_Read(&attitude) == 0U) return;
 
+  if ((now_ms - last_print_ms) < MPU_APP_PRINT_PERIOD_MS) return;
+  last_print_ms = now_ms;
+
   printf("%.2f,%.2f,%.2f\r\n",
          (double)attitude.pitch,
          (double)attitude.roll,
@@ -52,6 +60,7 @@ uint8_t MpuApp_Read(MpuApp_Attitude_t *attitude) {
   if (MPU_getdata() == 0U) return 0U;
 
   data.tick_ms = HAL_GetTick();
+  data.sample_id = 0U;
   data.pitch   = fAY;
   data.roll    = fAX;
   data.yaw     = fAZ;
@@ -84,6 +93,8 @@ static void MpuApp_UpdateLatest(MpuApp_Attitude_t *attitude) {
     return;
   }
 
+  latest_sample_id++;
+  attitude->sample_id = latest_sample_id;
   latest_attitude = *attitude;
   latest_valid = 1U;
 }

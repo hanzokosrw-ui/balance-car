@@ -10,6 +10,7 @@ extern "C" {
 typedef struct
 {
   uint32_t tick_ms;
+  uint32_t sample_id;
   float pitch;
   float roll;
   float yaw;

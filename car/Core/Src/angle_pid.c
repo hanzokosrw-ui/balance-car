@@ -7,23 +7,25 @@
 #include "mpu_app.h"
 #include "usart.h"
 
-#define ANGLE_PID_PERIOD_MS 10U
-#define ANGLE_PID_DT_S 0.01f
+#define ANGLE_PID_CONTROL_DIVIDER 2U
 #define ANGLE_PID_MPU_TIMEOUT_MS 30U
-#define ANGLE_PID_STOP_ANGLE_DEG 55.0f
-#define ANGLE_PID_OUTPUT_MAX_PERCENT 65.0f
-#define ANGLE_PID_INTEGRAL_MAX 100.0f
-#define ANGLE_PID_GYRO_LSB_PER_DPS 16.4f
-#define ANGLE_PID_OUTPUT_SIGN -1.0f
+#define ANGLE_PID_STOP_ANGLE_DEG 40.0f
+#define ANGLE_PID_DEAD_ZONE_DEG 0.0f
+#define ANGLE_PID_GAIN_SCALE 100.0f
+#define ANGLE_PID_SOURCE_PWM_PERIOD 7200
+#define ANGLE_PID_SOURCE_PWM_LIMIT 6900
+#define ANGLE_PID_OUTPUT_MAX_PERCENT ((int16_t)((ANGLE_PID_SOURCE_PWM_LIMIT * 100 + ANGLE_PID_SOURCE_PWM_PERIOD / 2) / ANGLE_PID_SOURCE_PWM_PERIOD))
+#define ANGLE_PID_OUTPUT_SIGN 1.0f
 #define ANGLE_PID_SERIAL_LINE_SIZE 64U
 
-#define ANGLE_PID_DEFAULT_TARGET 0.0f
-#define ANGLE_PID_DEFAULT_KP 8.0f
+#define ANGLE_PID_DEFAULT_TARGET 1.0f
+#define ANGLE_PID_DEFAULT_KP 2700.0f
 #define ANGLE_PID_DEFAULT_KI 0.0f
-#define ANGLE_PID_DEFAULT_KD 8.0f
+#define ANGLE_PID_DEFAULT_KD 110.0f
 
 static AnglePidStatus_t angle_pid;
-static uint32_t angle_pid_last_ms = 0U;
+static uint32_t angle_pid_last_sample_id = 0U;
+static uint8_t angle_pid_sample_divider = 0U;
 static uint8_t angle_pid_rx_byte = 0U;
 static volatile uint8_t angle_pid_rx_index = 0U;
 static volatile uint8_t angle_pid_line_ready = 0U;
@@ -31,8 +33,9 @@ static volatile uint8_t angle_pid_rx_overflow = 0U;
 static volatile char angle_pid_rx_line[ANGLE_PID_SERIAL_LINE_SIZE];
 
 static float AnglePid_Abs(float value);
-static float AnglePid_LimitFloat(float value, float min_value, float max_value);
 static int16_t AnglePid_RoundToDuty(float value);
+static float AnglePid_Balance(float angle, float gyro);
+static int16_t AnglePid_PwmLimit(int16_t duty, int16_t max_value, int16_t min_value);
 static void AnglePid_ResetDynamicState(void);
 static void AnglePid_StartUartReceive(void);
 static void AnglePid_PushSerialByte(uint8_t data);
@@ -51,7 +54,8 @@ void AnglePid_Init(void)
   angle_pid.kd = ANGLE_PID_DEFAULT_KD;
   angle_pid.safe = 1U;
   AnglePid_ResetDynamicState();
-  angle_pid_last_ms = HAL_GetTick();
+  angle_pid_last_sample_id = 0U;
+  angle_pid_sample_divider = 0U;
   angle_pid_rx_index = 0U;
   angle_pid_line_ready = 0U;
   angle_pid_rx_overflow = 0U;
@@ -63,17 +67,12 @@ void AnglePid_Task(void)
   uint32_t now_ms;
   MpuApp_Attitude_t attitude;
   float pitch;
-  float gyro_pitch_dps;
+  float gyro_pitch;
   float error;
   float output;
   int16_t duty;
 
   now_ms = HAL_GetTick();
-  if ((now_ms - angle_pid_last_ms) < ANGLE_PID_PERIOD_MS)
-  {
-    return;
-  }
-  angle_pid_last_ms = now_ms;
 
   if (MpuApp_GetLatest(&attitude) == 0U)
   {
@@ -87,6 +86,19 @@ void AnglePid_Task(void)
     return;
   }
 
+  if (attitude.sample_id == angle_pid_last_sample_id)
+  {
+    return;
+  }
+
+  angle_pid_last_sample_id = attitude.sample_id;
+  angle_pid_sample_divider++;
+  if (angle_pid_sample_divider < ANGLE_PID_CONTROL_DIVIDER)
+  {
+    return;
+  }
+  angle_pid_sample_divider = 0U;
+
   pitch = attitude.pitch;
   angle_pid.last_pitch = pitch;
 
@@ -99,23 +111,22 @@ void AnglePid_Task(void)
   }
 
   angle_pid.safe = 1U;
-  gyro_pitch_dps = ((float)attitude.gyro_y) / ANGLE_PID_GYRO_LSB_PER_DPS;
   error = angle_pid.target_pitch - pitch;
 
-  angle_pid.integral += error * ANGLE_PID_DT_S;
-  angle_pid.integral = AnglePid_LimitFloat(angle_pid.integral,
-                                           -ANGLE_PID_INTEGRAL_MAX,
-                                           ANGLE_PID_INTEGRAL_MAX);
+  if ((ANGLE_PID_DEAD_ZONE_DEG > 0.0f) &&
+      (AnglePid_Abs(error) <= ANGLE_PID_DEAD_ZONE_DEG))
+  {
+    angle_pid.integral = 0.0f;
+    angle_pid.output = 0;
+    Motor_Stop();
+    return;
+  }
 
-  output = angle_pid.kp * error +
-           angle_pid.ki * angle_pid.integral -
-           angle_pid.kd * gyro_pitch_dps;
-  output *= ANGLE_PID_OUTPUT_SIGN;
-  output = AnglePid_LimitFloat(output,
-                               -ANGLE_PID_OUTPUT_MAX_PERCENT,
-                               ANGLE_PID_OUTPUT_MAX_PERCENT);
-
-  duty = AnglePid_RoundToDuty(output);
+  gyro_pitch = (float)attitude.gyro_y;
+  output = AnglePid_Balance(pitch, gyro_pitch);
+  duty = AnglePid_PwmLimit(AnglePid_RoundToDuty(output),
+                           ANGLE_PID_OUTPUT_MAX_PERCENT,
+                           -ANGLE_PID_OUTPUT_MAX_PERCENT);
   angle_pid.output = duty;
   Motor_SetDuty(duty, duty);
 }
@@ -212,21 +223,6 @@ static float AnglePid_Abs(float value)
   return value;
 }
 
-static float AnglePid_LimitFloat(float value, float min_value, float max_value)
-{
-  if (value > max_value)
-  {
-    return max_value;
-  }
-
-  if (value < min_value)
-  {
-    return min_value;
-  }
-
-  return value;
-}
-
 static int16_t AnglePid_RoundToDuty(float value)
 {
   if (value >= 0.0f)
@@ -235,6 +231,35 @@ static int16_t AnglePid_RoundToDuty(float value)
   }
 
   return (int16_t)(value - 0.5f);
+}
+
+static float AnglePid_Balance(float angle, float gyro)
+{
+  float angle_bias;
+  float gyro_bias;
+  float balance;
+
+  angle_bias = angle_pid.target_pitch - angle;
+  gyro_bias = 0.0f - gyro;
+  balance = -angle_pid.kp / ANGLE_PID_GAIN_SCALE * angle_bias -
+            gyro_bias * angle_pid.kd / ANGLE_PID_GAIN_SCALE;
+
+  return balance * ANGLE_PID_OUTPUT_SIGN;
+}
+
+static int16_t AnglePid_PwmLimit(int16_t duty, int16_t max_value, int16_t min_value)
+{
+  if (duty > max_value)
+  {
+    return max_value;
+  }
+
+  if (duty < min_value)
+  {
+    return min_value;
+  }
+
+  return duty;
 }
 
 static void AnglePid_ResetDynamicState(void)
@@ -388,7 +413,7 @@ static void AnglePid_HandleCommand(char *line)
     return;
   }
 
-  printf("ERR cmd: KP=10.0 or KI=0.0 or KD=0.08 or PID=10,0,0.08 or GET\r\n");
+  printf("ERR cmd: KP=27000 or KI=0 or KD=110 or PID=27000,0,110 or GET\r\n");
 }
 
 static void AnglePid_PrintStatus(const char *prefix)
