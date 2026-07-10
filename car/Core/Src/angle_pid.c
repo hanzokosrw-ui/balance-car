@@ -5,15 +5,16 @@
 
 #include "motor.h"
 #include "mpu_app.h"
+#include "speed_ctrl.h"
 #include "usart.h"
 
 #define ANGLE_PID_DT_S 0.01f
 #define ANGLE_PID_GAIN_SCALE -100.0f
-#define ANGLE_PID_DEFAULT_KP 800.0f
+#define ANGLE_PID_DEFAULT_KP 900.0f
 #define ANGLE_PID_DEFAULT_KI 0.0f
-#define ANGLE_PID_DEFAULT_KD 180.0f
+#define ANGLE_PID_DEFAULT_KD 300.0f
 #define ANGLE_PID_TARGET_ANGLE_DEG 0.0f
-#define ANGLE_PID_MAX_PWM_DUTY_PERCENT 70.0f
+#define ANGLE_PID_MAX_PWM_DUTY_PERCENT 90.0f
 #define ANGLE_PID_MAX_CONTROL_ANGLE_DEG 40.0f
 #define ANGLE_PID_INTEGRAL_MAX 100.0f
 #define ANGLE_PID_MPU_TIMEOUT_MS 30U
@@ -21,6 +22,8 @@
 #define ANGLE_PID_SERIAL_LINE_SIZE 64U
 
 static AnglePid_State_t angle_pid;
+static float mechanical_mid_angle = 0.0f;
+static uint8_t mechanical_mid_ready = 0U;
 static float angle_pid_max_pwm = ANGLE_PID_MAX_PWM_DUTY_PERCENT;
 static float angle_pid_max_control_angle = ANGLE_PID_MAX_CONTROL_ANGLE_DEG;
 static uint8_t angle_pid_rx_byte = 0U;
@@ -47,6 +50,8 @@ void AnglePid_Init(void)
   angle_pid.kp = ANGLE_PID_DEFAULT_KP;
   angle_pid.ki = ANGLE_PID_DEFAULT_KI;
   angle_pid.kd = ANGLE_PID_DEFAULT_KD;
+  mechanical_mid_angle = 0.0f;
+  mechanical_mid_ready = 0U;
   angle_pid.target_angle = ANGLE_PID_TARGET_ANGLE_DEG;
   angle_pid_max_pwm = ANGLE_PID_MAX_PWM_DUTY_PERCENT;
   angle_pid_max_control_angle = ANGLE_PID_MAX_CONTROL_ANGLE_DEG;
@@ -77,6 +82,8 @@ void Control_Task_10ms(void)
 {
   uint32_t now_ms;
   MpuApp_Attitude_t attitude;
+  MpuApp_MechanicalMidpoint_t midpoint;
+  uint8_t midpoint_was_ready;
   float p_term;
   float i_term;
   float d_term;
@@ -103,7 +110,26 @@ void Control_Task_10ms(void)
   angle_pid.actual_angle = attitude.pitch;
   angle_pid.gyro = ((float)attitude.gyro_y) / ANGLE_PID_GYRO_LSB_PER_DPS;
 
-  if (AnglePid_Abs(angle_pid.actual_angle) > angle_pid_max_control_angle)
+  midpoint_was_ready = mechanical_mid_ready;
+  MpuApp_GetMechanicalMidpoint(&midpoint);
+  mechanical_mid_angle = midpoint.angle_deg;
+  mechanical_mid_ready = midpoint.ready;
+
+  if (mechanical_mid_ready == 0U)
+  {
+    AnglePid_Reset();
+    return;
+  }
+
+  if (midpoint_was_ready == 0U)
+  {
+    angle_pid.target_angle = mechanical_mid_angle;
+    angle_pid.integral = 0.0f;
+    angle_pid.last_error = 0.0f;
+  }
+
+  if (AnglePid_Abs(angle_pid.actual_angle - mechanical_mid_angle) >
+      angle_pid_max_control_angle)
   {
     angle_pid.protect_stop = 1U;
     AnglePid_Reset();
@@ -126,8 +152,6 @@ void Control_Task_10ms(void)
   angle_pid.avepwm = AnglePid_LimitFloat(angle_pid.avepwm,
                                          -angle_pid_max_pwm,
                                          angle_pid_max_pwm);
-  angle_pid.difpwm = 0.0f;
-
   AnglePid_UpdateMotorPwm();
   angle_pid.last_error = angle_pid.error;
 }
@@ -226,13 +250,19 @@ static int16_t AnglePid_RoundToDuty(float value)
 
 static void AnglePid_UpdateMotorPwm(void)
 {
-  float half_difpwm;
+  float balance_pwm;
+  float velocity_pwm;
+  float turn_pwm;
   float left_pwm;
   float right_pwm;
 
-  half_difpwm = angle_pid.difpwm * 0.5f;
-  left_pwm = angle_pid.avepwm + half_difpwm;
-  right_pwm = angle_pid.avepwm - half_difpwm;
+  balance_pwm = angle_pid.avepwm;
+  velocity_pwm = SpeedCtrl_GetVelocityPwm();
+  turn_pwm = SpeedCtrl_GetTurnPwm();
+  angle_pid.difpwm = turn_pwm;
+
+  left_pwm = balance_pwm + velocity_pwm + turn_pwm;
+  right_pwm = balance_pwm + velocity_pwm - turn_pwm;
 
   left_pwm = AnglePid_LimitFloat(left_pwm,
                                  -angle_pid_max_pwm,
@@ -243,7 +273,9 @@ static void AnglePid_UpdateMotorPwm(void)
 
   angle_pid.left_pwm = AnglePid_RoundToDuty(left_pwm);
   angle_pid.right_pwm = AnglePid_RoundToDuty(right_pwm);
-  Motor_SetDuty(angle_pid.left_pwm, angle_pid.right_pwm);
+  Motor_SetDutyWithDeadZone(angle_pid.left_pwm,
+                            angle_pid.right_pwm,
+                            MOTOR_DEFAULT_DEAD_ZONE_PERCENT);
 }
 
 void AnglePid_UART_RxCpltCallback(UART_HandleTypeDef *huart)
@@ -306,13 +338,15 @@ static void AnglePid_HandleCommand(char *line)
   float ki;
   float kd;
   float value;
+  float value2;
 
-  if (AnglePid_KeyStartsWith(line, "KP", &value_text) != 0U)
+  if ((AnglePid_KeyStartsWith(line, "AKP", &value_text) != 0U) ||
+      (AnglePid_KeyStartsWith(line, "KP", &value_text) != 0U))
   {
     cursor = value_text;
     if (AnglePid_ParseFloat(&cursor, &value) == 0U)
     {
-      printf("ERR KP value\r\n");
+      printf("ERR AKP value\r\n");
       return;
     }
     angle_pid.kp = value;
@@ -321,12 +355,13 @@ static void AnglePid_HandleCommand(char *line)
     return;
   }
 
-  if (AnglePid_KeyStartsWith(line, "KI", &value_text) != 0U)
+  if ((AnglePid_KeyStartsWith(line, "AKI", &value_text) != 0U) ||
+      (AnglePid_KeyStartsWith(line, "KI", &value_text) != 0U))
   {
     cursor = value_text;
     if (AnglePid_ParseFloat(&cursor, &value) == 0U)
     {
-      printf("ERR KI value\r\n");
+      printf("ERR AKI value\r\n");
       return;
     }
     angle_pid.ki = value;
@@ -335,12 +370,13 @@ static void AnglePid_HandleCommand(char *line)
     return;
   }
 
-  if (AnglePid_KeyStartsWith(line, "KD", &value_text) != 0U)
+  if ((AnglePid_KeyStartsWith(line, "AKD", &value_text) != 0U) ||
+      (AnglePid_KeyStartsWith(line, "KD", &value_text) != 0U))
   {
     cursor = value_text;
     if (AnglePid_ParseFloat(&cursor, &value) == 0U)
     {
-      printf("ERR KD value\r\n");
+      printf("ERR AKD value\r\n");
       return;
     }
     angle_pid.kd = value;
@@ -349,14 +385,15 @@ static void AnglePid_HandleCommand(char *line)
     return;
   }
 
-  if (AnglePid_KeyStartsWith(line, "PID", &value_text) != 0U)
+  if ((AnglePid_KeyStartsWith(line, "APID", &value_text) != 0U) ||
+      (AnglePid_KeyStartsWith(line, "PID", &value_text) != 0U))
   {
     cursor = value_text;
     if ((AnglePid_ParseFloat(&cursor, &kp) == 0U) ||
         (AnglePid_ParseFloat(&cursor, &ki) == 0U) ||
         (AnglePid_ParseFloat(&cursor, &kd) == 0U))
     {
-      printf("ERR PID format\r\n");
+      printf("ERR APID format\r\n");
       return;
     }
     angle_pid.kp = kp;
@@ -379,6 +416,139 @@ static void AnglePid_HandleCommand(char *line)
     angle_pid.target_angle = value;
     AnglePid_Reset();
     AnglePid_PrintStatus("OK");
+    return;
+  }
+
+  if ((AnglePid_KeyStartsWith(line, "SPEED", &value_text) != 0U) ||
+      (AnglePid_KeyStartsWith(line, "SPD", &value_text) != 0U))
+  {
+    cursor = value_text;
+    if (AnglePid_ParseFloat(&cursor, &value) == 0U)
+    {
+      printf("ERR SPEED value\r\n");
+      return;
+    }
+    if (AnglePid_ParseFloat(&cursor, &value2) == 0U)
+    {
+      value2 = value;
+    }
+    SpeedCtrl_SetTarget((int32_t)value, (int32_t)value2);
+    SpeedCtrl_PrintStatus("OK");
+    return;
+  }
+
+  if (AnglePid_KeyStartsWith(line, "TURN", &value_text) != 0U)
+  {
+    cursor = value_text;
+    if (AnglePid_ParseFloat(&cursor, &value) == 0U)
+    {
+      printf("ERR TURN value\r\n");
+      return;
+    }
+    SpeedCtrl_SetTarget((int32_t)value, (int32_t)(-value));
+    SpeedCtrl_PrintStatus("OK");
+    return;
+  }
+
+  if ((AnglePid_KeyStartsWith(line, "VKP", &value_text) != 0U) ||
+      (AnglePid_KeyStartsWith(line, "SKP", &value_text) != 0U))
+  {
+    cursor = value_text;
+    if (AnglePid_ParseFloat(&cursor, &kp) == 0U)
+    {
+      printf("ERR VKP value\r\n");
+      return;
+    }
+    SpeedCtrl_SetSpeedKp(kp);
+    SpeedCtrl_PrintStatus("OK");
+    return;
+  }
+
+  if ((AnglePid_KeyStartsWith(line, "VKI", &value_text) != 0U) ||
+      (AnglePid_KeyStartsWith(line, "SKI", &value_text) != 0U))
+  {
+    cursor = value_text;
+    if (AnglePid_ParseFloat(&cursor, &ki) == 0U)
+    {
+      printf("ERR VKI value\r\n");
+      return;
+    }
+    SpeedCtrl_SetSpeedKi(ki);
+    SpeedCtrl_PrintStatus("OK");
+    return;
+  }
+
+  if ((AnglePid_KeyStartsWith(line, "VPID", &value_text) != 0U) ||
+      (AnglePid_KeyStartsWith(line, "SPID", &value_text) != 0U))
+  {
+    cursor = value_text;
+    if ((AnglePid_ParseFloat(&cursor, &kp) == 0U) ||
+        (AnglePid_ParseFloat(&cursor, &ki) == 0U))
+    {
+      printf("ERR VPID format\r\n");
+      return;
+    }
+    SpeedCtrl_SetSpeedGains(kp, ki);
+    SpeedCtrl_PrintStatus("OK");
+    return;
+  }
+
+  if ((AnglePid_KeyStartsWith(line, "TKP", &value_text) != 0U) ||
+      (AnglePid_KeyStartsWith(line, "DKP", &value_text) != 0U))
+  {
+    cursor = value_text;
+    if (AnglePid_ParseFloat(&cursor, &kp) == 0U)
+    {
+      printf("ERR TKP value\r\n");
+      return;
+    }
+    SpeedCtrl_SetDiffKp(kp);
+    SpeedCtrl_PrintStatus("OK");
+    return;
+  }
+
+  if ((AnglePid_KeyStartsWith(line, "TKI", &value_text) != 0U) ||
+      (AnglePid_KeyStartsWith(line, "DKI", &value_text) != 0U))
+  {
+    cursor = value_text;
+    if (AnglePid_ParseFloat(&cursor, &ki) == 0U)
+    {
+      printf("ERR TKI value\r\n");
+      return;
+    }
+    SpeedCtrl_SetDiffKi(ki);
+    SpeedCtrl_PrintStatus("OK");
+    return;
+  }
+
+  if ((AnglePid_KeyStartsWith(line, "TPID", &value_text) != 0U) ||
+      (AnglePid_KeyStartsWith(line, "DPID", &value_text) != 0U))
+  {
+    cursor = value_text;
+    if ((AnglePid_ParseFloat(&cursor, &kp) == 0U) ||
+        (AnglePid_ParseFloat(&cursor, &ki) == 0U))
+    {
+      printf("ERR TPID format\r\n");
+      return;
+    }
+    SpeedCtrl_SetDiffGains(kp, ki);
+    SpeedCtrl_PrintStatus("OK");
+    return;
+  }
+
+  if ((AnglePid_KeyStartsWith(line, "VLIMIT", &value_text) != 0U) ||
+      (AnglePid_KeyStartsWith(line, "SLIMIT", &value_text) != 0U) ||
+      (AnglePid_KeyStartsWith(line, "SOUT", &value_text) != 0U))
+  {
+    cursor = value_text;
+    if ((AnglePid_ParseFloat(&cursor, &value) == 0U) ||
+        (AnglePid_ParseFloat(&cursor, &value2) == 0U))
+    {
+      printf("ERR VLIMIT format\r\n");
+      return;
+    }
+    SpeedCtrl_SetLimits(value, value2);
+    SpeedCtrl_PrintStatus("OK");
     return;
   }
 
@@ -417,12 +587,33 @@ static void AnglePid_HandleCommand(char *line)
       (AnglePid_EqualsIgnoreCase(line, "?") != 0U))
   {
     AnglePid_PrintStatus("PID");
+    SpeedCtrl_PrintStatus("SPD");
+    return;
+  }
+
+  if ((AnglePid_EqualsIgnoreCase(line, "SGET") != 0U) ||
+      (AnglePid_EqualsIgnoreCase(line, "SPD?") != 0U))
+  {
+    SpeedCtrl_PrintStatus("SPD");
+    return;
+  }
+
+  if ((AnglePid_EqualsIgnoreCase(line, "CAL") != 0U) ||
+      (AnglePid_EqualsIgnoreCase(line, "MIDCAL") != 0U))
+  {
+    MpuApp_ResetMechanicalMidpoint();
+    mechanical_mid_angle = 0.0f;
+    mechanical_mid_ready = 0U;
+    angle_pid.target_angle = ANGLE_PID_TARGET_ANGLE_DEG;
+    AnglePid_Reset();
+    AnglePid_PrintStatus("CAL");
     return;
   }
 
   if (AnglePid_EqualsIgnoreCase(line, "STOP") != 0U)
   {
     angle_pid.enabled = 0U;
+    SpeedCtrl_SetEnabled(0U);
     AnglePid_Reset();
     AnglePid_PrintStatus("OK");
     return;
@@ -431,22 +622,29 @@ static void AnglePid_HandleCommand(char *line)
   if (AnglePid_EqualsIgnoreCase(line, "START") != 0U)
   {
     angle_pid.enabled = 1U;
+    SpeedCtrl_SetEnabled(1U);
     AnglePid_Reset();
     AnglePid_PrintStatus("OK");
     return;
   }
 
-  printf("ERR cmd: KP=1400 or KI=0 or KD=140 or PID=1400,0,140 or TARGET=0 or PWM=65 or ANGLE=40 or GET\r\n");
+  printf("ERR cmd: AKP/AKI/AKD/APID or TARGET/PWM/ANGLE or SPEED=L,R or TURN=x or VKP/VKI/VPID or TKP/TKI/TPID or VLIMIT=vel,turn or GET/CAL\r\n");
 }
 
 static void AnglePid_PrintStatus(const char *prefix)
 {
-  printf("%s KP=%.3f KI=%.3f KD=%.3f T=%.2f PWM=%.1f ANGLE=%.1f EN=%u STOP=%u L=%d R=%d\r\n",
+  MpuApp_MechanicalMidpoint_t midpoint;
+
+  MpuApp_GetMechanicalMidpoint(&midpoint);
+  printf("%s KP=%.3f KI=%.3f KD=%.3f T=%.2f MID=%.2f MID_OK=%u MID_N=%u PWM=%.1f ANGLE=%.1f EN=%u STOP=%u L=%d R=%d\r\n",
          prefix,
          (double)angle_pid.kp,
          (double)angle_pid.ki,
          (double)angle_pid.kd,
          (double)angle_pid.target_angle,
+         (double)midpoint.angle_deg,
+         midpoint.ready,
+         (unsigned int)midpoint.stable_samples,
          (double)angle_pid_max_pwm,
          (double)angle_pid_max_control_angle,
          angle_pid.enabled,

@@ -3,178 +3,250 @@
 #include <stdio.h>
 
 #include "encoder.h"
-#include "motor.h"
 
+#define SPEED_CTRL_ENABLE 0U
 #define SPEED_CTRL_PERIOD_MS 10U
-#define SPEED_CTRL_REPORT_PERIOD_MS 50U
-#define SPEED_CTRL_ENABLE_VOFA_REPORT 1U
-
-#define SPEED_CTRL_OUTPUT_MAX_X100 10000L
-#define SPEED_CTRL_OUTPUT_MIN_X100 -10000L
-
-#define SPEED_PI_KP 20
-#define SPEED_PI_KI 2
+#define SPEED_CTRL_DT_S 0.01f
+#define SPEED_CTRL_DEFAULT_VELOCITY_KP -0.003f
+#define SPEED_CTRL_DEFAULT_VELOCITY_KI 0.001f
+#define SPEED_CTRL_DEFAULT_TURN_KP 0.020f
+#define SPEED_CTRL_DEFAULT_TURN_KI 0.000f
+#define SPEED_CTRL_MAX_VELOCITY_PWM_PERCENT 40.0f
+#define SPEED_CTRL_MAX_TURN_PWM_PERCENT 40.0f
+#define SPEED_CTRL_INTEGRAL_MAX 5000.0f
 
 typedef struct
 {
-  int32_t target_speed_mm_s_x100;
-  int32_t measured_speed_mm_s_x100;
+  float target_speed_mm_s;
+  float measured_speed_mm_s;
+  float error;
+  float integral;
+  float kp;
+  float ki;
+  float output;
+} SpeedCtrl_PI_t;
 
-  int32_t error;
-  int32_t last_error;
+static SpeedCtrl_PI_t velocity_pi;
+static SpeedCtrl_PI_t turn_pi;
+static float speed_ctrl_max_velocity_pwm = SPEED_CTRL_MAX_VELOCITY_PWM_PERCENT;
+static float speed_ctrl_max_turn_pwm = SPEED_CTRL_MAX_TURN_PWM_PERCENT;
+static float velocity_pwm = 0.0f;
+static float turn_pwm = 0.0f;
+static uint8_t speed_ctrl_enabled = 1U;
 
-  int32_t output_x100;
-
-  int32_t kp;
-  int32_t ki;
-} SpeedPI_t;
-
-static SpeedPI_t left_pi;
-static SpeedPI_t right_pi;
-
-static uint32_t speed_ctrl_last_ms = 0U;
-static uint32_t speed_ctrl_last_report_ms = 0U;
-
-static void SpeedPI_Init(SpeedPI_t *pi);
-static int32_t SpeedPI_Update(SpeedPI_t *pi, int32_t measured_speed_mm_s_x100);
-static int32_t SpeedCtrl_LimitOutput(int32_t output_x100);
-static int32_t SpeedCtrl_RoundX100ToInteger(int32_t value_x100);
-static void SpeedCtrl_ReportVofa(void);
+static void SpeedCtrl_InitPi(SpeedCtrl_PI_t *pi, float kp, float ki);
+static uint8_t SpeedCtrl_IsEnabled(void);
+static float SpeedCtrl_UpdatePi(SpeedCtrl_PI_t *pi, float measured, float max_output);
+static float SpeedCtrl_LimitFloat(float value, float min_value, float max_value);
+static int32_t SpeedCtrl_RoundToInt32(float value);
 
 void SpeedCtrl_Init(void)
 {
-  SpeedPI_Init(&left_pi);
-  SpeedPI_Init(&right_pi);
-
-  speed_ctrl_last_ms = HAL_GetTick();
-  speed_ctrl_last_report_ms = speed_ctrl_last_ms;
+  SpeedCtrl_InitPi(&velocity_pi, SPEED_CTRL_DEFAULT_VELOCITY_KP, SPEED_CTRL_DEFAULT_VELOCITY_KI);
+  SpeedCtrl_InitPi(&turn_pi, SPEED_CTRL_DEFAULT_TURN_KP, SPEED_CTRL_DEFAULT_TURN_KI);
+  speed_ctrl_max_velocity_pwm = SPEED_CTRL_MAX_VELOCITY_PWM_PERCENT;
+  speed_ctrl_max_turn_pwm = SPEED_CTRL_MAX_TURN_PWM_PERCENT;
+  velocity_pwm = 0.0f;
+  turn_pwm = 0.0f;
+  speed_ctrl_enabled = (SPEED_CTRL_ENABLE == 0U) ? 0U : 1U;
 }
 
-static void SpeedPI_Init(SpeedPI_t *pi)
+static void SpeedCtrl_InitPi(SpeedCtrl_PI_t *pi, float kp, float ki)
 {
-  pi->target_speed_mm_s_x100 = 0;
-  pi->measured_speed_mm_s_x100 = 0;
-
-  pi->error = 0;
-  pi->last_error = 0;
-
-  pi->output_x100 = 0;
-
-  pi->kp = SPEED_PI_KP;
-  pi->ki = SPEED_PI_KI;
+  pi->target_speed_mm_s = 0.0f;
+  pi->measured_speed_mm_s = 0.0f;
+  pi->error = 0.0f;
+  pi->integral = 0.0f;
+  pi->kp = kp;
+  pi->ki = ki;
+  pi->output = 0.0f;
 }
 
 void SpeedCtrl_SetTarget(int32_t left_mm_s, int32_t right_mm_s)
 {
-  left_pi.target_speed_mm_s_x100 = left_mm_s * 100L;
-  right_pi.target_speed_mm_s_x100 = right_mm_s * 100L;
+  velocity_pi.target_speed_mm_s = ((float)left_mm_s + (float)right_mm_s) * 0.5f;
+  turn_pi.target_speed_mm_s = (float)left_mm_s - (float)right_mm_s;
 }
 
-static int32_t SpeedPI_Update(SpeedPI_t *pi, int32_t measured_speed_mm_s_x100)
+void SpeedCtrl_SetSpeedGains(float kp, float ki)
 {
-  int32_t delta_output;
-
-  pi->measured_speed_mm_s_x100 = measured_speed_mm_s_x100;
-
-  pi->error = pi->target_speed_mm_s_x100 - pi->measured_speed_mm_s_x100;
-
-  delta_output = (pi->kp * (pi->error - pi->last_error) +
-                  pi->ki * pi->error) / 1000L;
-
-  pi->output_x100 += delta_output;
-  pi->output_x100 = SpeedCtrl_LimitOutput(pi->output_x100);
-
-  pi->last_error = pi->error;
-
-  return pi->output_x100;
+  velocity_pi.kp = kp;
+  velocity_pi.ki = ki;
+  velocity_pi.integral = 0.0f;
 }
 
-static int32_t SpeedCtrl_LimitOutput(int32_t output_x100)
+void SpeedCtrl_SetSpeedKp(float kp)
 {
-  if (output_x100 > SPEED_CTRL_OUTPUT_MAX_X100)
-  {
-    return SPEED_CTRL_OUTPUT_MAX_X100;
-  }
-
-  if (output_x100 < SPEED_CTRL_OUTPUT_MIN_X100)
-  {
-    return SPEED_CTRL_OUTPUT_MIN_X100;
-  }
-
-  return output_x100;
+  velocity_pi.kp = kp;
+  velocity_pi.integral = 0.0f;
 }
 
-void SpeedCtrl_Task(void)
+void SpeedCtrl_SetSpeedKi(float ki)
 {
-  uint32_t now_ms;
-  int32_t left_output_x100;
-  int32_t right_output_x100;
+  velocity_pi.ki = ki;
+  velocity_pi.integral = 0.0f;
+}
 
-  now_ms = HAL_GetTick();
+void SpeedCtrl_SetDiffGains(float kp, float ki)
+{
+  turn_pi.kp = kp;
+  turn_pi.ki = ki;
+  turn_pi.integral = 0.0f;
+}
 
-  if ((now_ms - speed_ctrl_last_ms) < SPEED_CTRL_PERIOD_MS)
+void SpeedCtrl_SetDiffKp(float kp)
+{
+  turn_pi.kp = kp;
+  turn_pi.integral = 0.0f;
+}
+
+void SpeedCtrl_SetDiffKi(float ki)
+{
+  turn_pi.ki = ki;
+  turn_pi.integral = 0.0f;
+}
+
+void SpeedCtrl_SetLimits(float max_velocity_pwm, float max_turn_pwm)
+{
+  speed_ctrl_max_velocity_pwm = SpeedCtrl_LimitFloat(max_velocity_pwm, 0.0f, 100.0f);
+  speed_ctrl_max_turn_pwm = SpeedCtrl_LimitFloat(max_turn_pwm, 0.0f, 100.0f);
+}
+
+void SpeedCtrl_SetEnabled(uint8_t enabled)
+{
+#if (SPEED_CTRL_ENABLE == 0U)
+  (void)enabled;
+  speed_ctrl_enabled = 0U;
+  SpeedCtrl_Stop();
+  return;
+#else
+  speed_ctrl_enabled = (enabled == 0U) ? 0U : 1U;
+  if (speed_ctrl_enabled == 0U)
   {
-    return;
-  }
-
-  speed_ctrl_last_ms = now_ms;
-
-  left_output_x100 = SpeedPI_Update(&left_pi, Encoder_GetLeftSpeedMmSX100());
-  right_output_x100 = SpeedPI_Update(&right_pi, Encoder_GetRightSpeedMmSX100());
-
-  Motor_SetDuty((int16_t)(left_output_x100 / 100L),
-                (int16_t)(right_output_x100 / 100L));
-
-#if SPEED_CTRL_ENABLE_VOFA_REPORT
-  if ((now_ms - speed_ctrl_last_report_ms) >= SPEED_CTRL_REPORT_PERIOD_MS)
-  {
-    speed_ctrl_last_report_ms = now_ms;
-    SpeedCtrl_ReportVofa();
+    SpeedCtrl_Stop();
   }
 #endif
 }
 
-void SpeedCtrl_Stop(void)
+void SpeedCtrl_Task(void)
 {
-  SpeedPI_Init(&left_pi);
-  SpeedPI_Init(&right_pi);
-  Motor_Stop();
-}
+  float left_speed;
+  float right_speed;
+  float average_speed;
+  float diff_speed;
 
-static int32_t SpeedCtrl_RoundX100ToInteger(int32_t value_x100)
-{
-  if (value_x100 >= 0L)
+  if (SpeedCtrl_IsEnabled() == 0U)
   {
-    return (value_x100 + 50L) / 100L;
+    return;
   }
 
-  return (value_x100 - 50L) / 100L;
+  left_speed = ((float)Encoder_GetLeftSpeedMmSX100()) / 100.0f;
+  right_speed = ((float)Encoder_GetRightSpeedMmSX100()) / 100.0f;
+  average_speed = (left_speed + right_speed) * 0.5f;
+  diff_speed = left_speed - right_speed;
+
+  velocity_pwm = SpeedCtrl_UpdatePi(&velocity_pi, average_speed, speed_ctrl_max_velocity_pwm);
+  turn_pwm = SpeedCtrl_UpdatePi(&turn_pi, diff_speed, speed_ctrl_max_turn_pwm);
 }
 
-static void SpeedCtrl_ReportVofa(void)
+void SpeedCtrl_Stop(void)
 {
-  int32_t left_target;
-  int32_t left_actual;
-  int32_t right_target;
-  int32_t right_actual;
-  int32_t left_pwm;
-  int32_t right_pwm;
+  velocity_pi.integral = 0.0f;
+  velocity_pi.error = 0.0f;
+  velocity_pi.output = 0.0f;
+  turn_pi.integral = 0.0f;
+  turn_pi.error = 0.0f;
+  turn_pi.output = 0.0f;
+  velocity_pwm = 0.0f;
+  turn_pwm = 0.0f;
+}
 
-  left_target = SpeedCtrl_RoundX100ToInteger(left_pi.target_speed_mm_s_x100);
-  left_actual = SpeedCtrl_RoundX100ToInteger(left_pi.measured_speed_mm_s_x100);
-  right_target = SpeedCtrl_RoundX100ToInteger(right_pi.target_speed_mm_s_x100);
-  right_actual = SpeedCtrl_RoundX100ToInteger(right_pi.measured_speed_mm_s_x100);
-  left_pwm = SpeedCtrl_RoundX100ToInteger(left_pi.output_x100);
-  right_pwm = SpeedCtrl_RoundX100ToInteger(right_pi.output_x100);
+float SpeedCtrl_GetVelocityPwm(void)
+{
+  if (SpeedCtrl_IsEnabled() == 0U)
+  {
+    return 0.0f;
+  }
 
-  printf("%ld,%ld,%ld,%ld,%ld,%ld\r\n",
-         (long)left_target,
-         (long)left_actual,
-         (long)right_target,
-         (long)right_actual,
-         (long)left_pwm,
-         (long)right_pwm);
+  return velocity_pwm;
+}
+
+float SpeedCtrl_GetTurnPwm(void)
+{
+  if (SpeedCtrl_IsEnabled() == 0U)
+  {
+    return 0.0f;
+  }
+
+  return turn_pwm;
+}
+
+void SpeedCtrl_PrintStatus(const char *prefix)
+{
+  printf("%s VEL_T=%ld VEL=%ld TURN_T=%ld TURN=%ld VKP=%.4f VKI=%.4f TKP=%.4f TKI=%.4f VPWM=%.2f TPWM=%.2f VMAX=%.1f TMAX=%.1f EN=%u\r\n",
+         prefix,
+         (long)SpeedCtrl_RoundToInt32(velocity_pi.target_speed_mm_s),
+         (long)SpeedCtrl_RoundToInt32(velocity_pi.measured_speed_mm_s),
+         (long)SpeedCtrl_RoundToInt32(turn_pi.target_speed_mm_s),
+         (long)SpeedCtrl_RoundToInt32(turn_pi.measured_speed_mm_s),
+         (double)velocity_pi.kp,
+         (double)velocity_pi.ki,
+         (double)turn_pi.kp,
+         (double)turn_pi.ki,
+         (double)velocity_pwm,
+         (double)turn_pwm,
+         (double)speed_ctrl_max_velocity_pwm,
+         (double)speed_ctrl_max_turn_pwm,
+         SpeedCtrl_IsEnabled());
+}
+
+static uint8_t SpeedCtrl_IsEnabled(void)
+{
+  if (SPEED_CTRL_ENABLE == 0U)
+  {
+    return 0U;
+  }
+
+  return speed_ctrl_enabled;
+}
+
+static float SpeedCtrl_UpdatePi(SpeedCtrl_PI_t *pi, float measured, float max_output)
+{
+  pi->measured_speed_mm_s = measured;
+  pi->error = pi->target_speed_mm_s - pi->measured_speed_mm_s;
+  pi->integral += pi->error * SPEED_CTRL_DT_S;
+  pi->integral = SpeedCtrl_LimitFloat(pi->integral,
+                                      -SPEED_CTRL_INTEGRAL_MAX,
+                                      SPEED_CTRL_INTEGRAL_MAX);
+  pi->output = pi->kp * pi->error + pi->ki * pi->integral;
+  pi->output = SpeedCtrl_LimitFloat(pi->output, -max_output, max_output);
+
+  return pi->output;
+}
+
+static float SpeedCtrl_LimitFloat(float value, float min_value, float max_value)
+{
+  if (value > max_value)
+  {
+    return max_value;
+  }
+
+  if (value < min_value)
+  {
+    return min_value;
+  }
+
+  return value;
+}
+
+static int32_t SpeedCtrl_RoundToInt32(float value)
+{
+  if (value >= 0.0f)
+  {
+    return (int32_t)(value + 0.5f);
+  }
+
+  return (int32_t)(value - 0.5f);
 }
 
 /* by codex */
-

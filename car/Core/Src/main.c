@@ -40,6 +40,10 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define BT_APP_DEFAULT_SPEED_MM_S 200
+#define BT_APP_SPEED_STEP_MM_S 50
+#define BT_APP_MIN_SPEED_MM_S 50
+#define BT_APP_MAX_SPEED_MM_S 600
 
 /* USER CODE END PD */
 
@@ -51,11 +55,14 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
+static int32_t bt_app_speed_mm_s = BT_APP_DEFAULT_SPEED_MM_S;
+static BluetoothCommand_t bt_app_motion_cmd = BT_CMD_NONE;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
+static void Main_ApplyBluetoothMotion(BluetoothCommand_t cmd);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -79,6 +86,51 @@ static void Main_FormatHexByte(uint8_t value, char *text)
   text[2] = Main_HexNibble(value >> 4);
   text[3] = Main_HexNibble(value);
   text[4] = '\0';
+}
+
+static void Main_ApplyBluetoothMotion(BluetoothCommand_t cmd)
+{
+  int32_t speed;
+
+  speed = bt_app_speed_mm_s;
+
+  switch (cmd)
+  {
+    case BT_CMD_FORWARD:
+      SpeedCtrl_SetTarget(speed, speed);
+      break;
+
+    case BT_CMD_FRONT_RIGHT:
+      SpeedCtrl_SetTarget(speed, speed / 2);
+      break;
+
+    case BT_CMD_TURN_RIGHT:
+      SpeedCtrl_SetTarget(speed, -speed);
+      break;
+
+    case BT_CMD_BACK_RIGHT:
+      SpeedCtrl_SetTarget(-speed, -(speed / 2));
+      break;
+
+    case BT_CMD_BACKWARD:
+      SpeedCtrl_SetTarget(-speed, -speed);
+      break;
+
+    case BT_CMD_BACK_LEFT:
+      SpeedCtrl_SetTarget(-(speed / 2), -speed);
+      break;
+
+    case BT_CMD_TURN_LEFT:
+      SpeedCtrl_SetTarget(-speed, speed);
+      break;
+
+    case BT_CMD_FRONT_LEFT:
+      SpeedCtrl_SetTarget(speed / 2, speed);
+      break;
+
+    default:
+      break;
+  }
 }
 
 /* USER CODE END 0 */
@@ -120,11 +172,11 @@ int main(void)
   /* USER CODE BEGIN 2 */
   Motor_Init();
 
-  /* Encoder_Init(); */
-  /* SpeedCtrl_Init(); */
+  Encoder_Init();
   /* SpeedCtrl_SetTarget(500, 500); */
   MpuApp_Init();
   AnglePid_Init();
+  SpeedCtrl_Init();
   Bluetooth_Init();
   OLED_Clear();
   OLED_ShowString(0, 0, (u8 *)"BT WAIT");
@@ -146,6 +198,7 @@ int main(void)
 
     if (Bluetooth_ReadCommand(&bt_cmd, &bt_raw) != 0U)
     {
+      Car_BluetoothCommand(bt_cmd, bt_raw);
       Main_FormatHexByte(bt_raw, bt_raw_text);
       bt_status = Bluetooth_GetStatus();
 
@@ -161,9 +214,6 @@ int main(void)
       OLED_ShowNumber(112, 48, bt_status.overflow_count, 2, 12);
       OLED_Refresh_Gram();
     }
-    /* Encoder_Task(); */
-    /* SpeedCtrl_Task(); */
-
     AnglePid_SerialTask();
     MpuApp_Task();
 
@@ -224,6 +274,60 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
   Bluetooth_UART_ErrorCallback(huart);
 }
 
+void Car_BluetoothCommand(BluetoothCommand_t cmd, uint8_t raw)
+{
+  (void)raw;
+
+  switch (cmd)
+  {
+    case BT_CMD_FORWARD:
+    case BT_CMD_FRONT_RIGHT:
+    case BT_CMD_TURN_RIGHT:
+    case BT_CMD_BACK_RIGHT:
+    case BT_CMD_BACKWARD:
+    case BT_CMD_BACK_LEFT:
+    case BT_CMD_TURN_LEFT:
+    case BT_CMD_FRONT_LEFT:
+      bt_app_motion_cmd = cmd;
+      SpeedCtrl_SetEnabled(1U);
+      Main_ApplyBluetoothMotion(cmd);
+      break;
+
+    case BT_CMD_SPEED_UP:
+      if (bt_app_speed_mm_s < BT_APP_MAX_SPEED_MM_S)
+      {
+        bt_app_speed_mm_s += BT_APP_SPEED_STEP_MM_S;
+        if (bt_app_speed_mm_s > BT_APP_MAX_SPEED_MM_S)
+        {
+          bt_app_speed_mm_s = BT_APP_MAX_SPEED_MM_S;
+        }
+      }
+      Main_ApplyBluetoothMotion(bt_app_motion_cmd);
+      break;
+
+    case BT_CMD_SPEED_DOWN:
+      if (bt_app_speed_mm_s > BT_APP_MIN_SPEED_MM_S)
+      {
+        bt_app_speed_mm_s -= BT_APP_SPEED_STEP_MM_S;
+        if (bt_app_speed_mm_s < BT_APP_MIN_SPEED_MM_S)
+        {
+          bt_app_speed_mm_s = BT_APP_MIN_SPEED_MM_S;
+        }
+      }
+      Main_ApplyBluetoothMotion(bt_app_motion_cmd);
+      break;
+
+    case BT_CMD_BUTTON:
+      bt_app_motion_cmd = BT_CMD_NONE;
+      SpeedCtrl_SetTarget(0, 0);
+      SpeedCtrl_Stop();
+      break;
+
+    default:
+      break;
+  }
+}
+
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
   static uint8_t pid_divider = 0U;
@@ -242,6 +346,8 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
   if (pid_divider >= 2U)
   {
     pid_divider = 0U;
+    Encoder_Task();
+    SpeedCtrl_Task();
     Control_Task_10ms();
   }
 }
